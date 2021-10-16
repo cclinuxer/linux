@@ -175,7 +175,6 @@ static const struct pci_error_handlers adf_err_handler = {
 /**
  * adf_enable_aer() - Enable Advance Error Reporting for acceleration device
  * @accel_dev:  Pointer to acceleration device.
- * @adf:        PCI device driver owning the given acceleration device.
  *
  * Function enables PCI Advance Error Reporting for the
  * QAT acceleration device accel_dev.
@@ -183,18 +182,19 @@ static const struct pci_error_handlers adf_err_handler = {
  *
  * Return: 0 on success, error code otherwise.
  */
-int adf_enable_aer(struct adf_accel_dev *accel_dev, struct pci_driver *adf)
+int adf_enable_aer(struct adf_accel_dev *accel_dev)
 {
 	struct pci_dev *pdev = accel_to_pci_dev(accel_dev);
+	struct pci_driver *pdrv = pdev->driver;
 
-	adf->err_handler = &adf_err_handler;
+	pdrv->err_handler = &adf_err_handler;
 	pci_enable_pcie_error_reporting(pdev);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(adf_enable_aer);
 
 /**
- * adf_disable_aer() - Enable Advance Error Reporting for acceleration device
+ * adf_disable_aer() - Disable Advance Error Reporting for acceleration device
  * @accel_dev:  Pointer to acceleration device.
  *
  * Function disables PCI Advance Error Reporting for the

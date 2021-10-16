@@ -465,6 +465,7 @@ static int acenic_probe_one(struct pci_dev *pdev,
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	ap = netdev_priv(dev);
+	ap->ndev = dev;
 	ap->pdev = pdev;
 	ap->name = pci_name(pdev);
 
@@ -1562,10 +1563,10 @@ static void ace_watchdog(struct net_device *data, unsigned int txqueue)
 }
 
 
-static void ace_tasklet(unsigned long arg)
+static void ace_tasklet(struct tasklet_struct *t)
 {
-	struct net_device *dev = (struct net_device *) arg;
-	struct ace_private *ap = netdev_priv(dev);
+	struct ace_private *ap = from_tasklet(ap, t, ace_tasklet);
+	struct net_device *dev = ap->ndev;
 	int cur_size;
 
 	cur_size = atomic_read(&ap->cur_rx_bufs);
@@ -1882,16 +1883,16 @@ static u32 ace_handle_event(struct net_device *dev, u32 evtcsm, u32 evtprd)
 				}
 			}
 
- 			if (ACE_IS_TIGON_I(ap)) {
- 				struct cmd cmd;
- 				cmd.evt = C_SET_RX_JUMBO_PRD_IDX;
- 				cmd.code = 0;
- 				cmd.idx = 0;
- 				ace_issue_cmd(ap->regs, &cmd);
- 			} else {
- 				writel(0, &((ap->regs)->RxJumboPrd));
- 				wmb();
- 			}
+			if (ACE_IS_TIGON_I(ap)) {
+				struct cmd cmd;
+				cmd.evt = C_SET_RX_JUMBO_PRD_IDX;
+				cmd.code = 0;
+				cmd.idx = 0;
+				ace_issue_cmd(ap->regs, &cmd);
+			} else {
+				writel(0, &((ap->regs)->RxJumboPrd));
+				wmb();
+			}
 
 			ap->jumbo = 0;
 			ap->rx_jumbo_skbprd = 0;
@@ -2269,7 +2270,7 @@ static int ace_open(struct net_device *dev)
 	/*
 	 * Setup the bottom half rx ring refill handler
 	 */
-	tasklet_init(&ap->ace_tasklet, ace_tasklet, (unsigned long)dev);
+	tasklet_setup(&ap->ace_tasklet, ace_tasklet);
 	return 0;
 }
 
@@ -2488,9 +2489,9 @@ restart:
 		}
 	}
 
- 	wmb();
- 	ap->tx_prd = idx;
- 	ace_set_txprd(regs, ap, idx);
+	wmb();
+	ap->tx_prd = idx;
+	ace_set_txprd(regs, ap, idx);
 
 	if (flagsize & BD_FLG_COAL_NOW) {
 		netif_stop_queue(dev);

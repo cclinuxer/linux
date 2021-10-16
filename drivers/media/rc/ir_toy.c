@@ -24,6 +24,7 @@ static const u8 COMMAND_VERSION[] = { 'v' };
 // End transmit and repeat reset command so we exit sump mode
 static const u8 COMMAND_RESET[] = { 0xff, 0xff, 0, 0, 0, 0, 0 };
 static const u8 COMMAND_SMODE_ENTER[] = { 's' };
+static const u8 COMMAND_SMODE_EXIT[] = { 0 };
 static const u8 COMMAND_TXSTART[] = { 0x26, 0x24, 0x25, 0x03 };
 
 #define REPLY_XMITCOUNT 't'
@@ -38,8 +39,8 @@ static const u8 COMMAND_TXSTART[] = { 0x26, 0x24, 0x25, 0x03 };
 #define LEN_SAMPLEMODEPROTO 3
 
 #define MIN_FW_VERSION 20
-#define UNIT_NS 21333
-#define MAX_TIMEOUT_NS (UNIT_NS * U16_MAX)
+#define UNIT_US 21
+#define MAX_TIMEOUT_US (UNIT_US * U16_MAX)
 
 #define MAX_PACKET 64
 
@@ -131,7 +132,7 @@ static void irtoy_response(struct irtoy *irtoy, u32 len)
 			if (v == 0xffff) {
 				rawir.pulse = false;
 			} else {
-				rawir.duration = v * UNIT_NS;
+				rawir.duration = v * UNIT_US;
 				ir_raw_event_store_with_timeout(irtoy->rc,
 								&rawir);
 			}
@@ -302,18 +303,36 @@ static int irtoy_tx(struct rc_dev *rc, uint *txbuf, uint count)
 		return -ENOMEM;
 
 	for (i = 0; i < count; i++) {
-		u16 v = DIV_ROUND_CLOSEST(US_TO_NS(txbuf[i]), UNIT_NS);
+		u16 v = DIV_ROUND_CLOSEST(txbuf[i], UNIT_US);
 
 		if (!v)
 			v = 1;
 		buf[i] = cpu_to_be16(v);
 	}
 
-	buf[count] = cpu_to_be16(0xffff);
+	buf[count] = 0xffff;
 
 	irtoy->tx_buf = buf;
 	irtoy->tx_len = size;
 	irtoy->emitted = 0;
+
+	// There is an issue where if the unit is receiving IR while the
+	// first TXSTART command is sent, the device might end up hanging
+	// with its led on. It does not respond to any command when this
+	// happens. To work around this, re-enter sample mode.
+	err = irtoy_command(irtoy, COMMAND_SMODE_EXIT,
+			    sizeof(COMMAND_SMODE_EXIT), STATE_RESET);
+	if (err) {
+		dev_err(irtoy->dev, "exit sample mode: %d\n", err);
+		return err;
+	}
+
+	err = irtoy_command(irtoy, COMMAND_SMODE_ENTER,
+			    sizeof(COMMAND_SMODE_ENTER), STATE_COMMAND);
+	if (err) {
+		dev_err(irtoy->dev, "enter sample mode: %d\n", err);
+		return err;
+	}
 
 	err = irtoy_command(irtoy, COMMAND_TXSTART, sizeof(COMMAND_TXSTART),
 			    STATE_TX);
@@ -438,7 +457,7 @@ static int irtoy_probe(struct usb_interface *intf,
 	rc->tx_ir = irtoy_tx;
 	rc->allowed_protocols = RC_PROTO_BIT_ALL_IR_DECODER;
 	rc->map_name = RC_MAP_RC6_MCE;
-	rc->rx_resolution = UNIT_NS;
+	rc->rx_resolution = UNIT_US;
 	rc->timeout = IR_DEFAULT_TIMEOUT;
 
 	/*
@@ -450,8 +469,8 @@ static int irtoy_probe(struct usb_interface *intf,
 	 *
 	 * So, make timeout a largish minimum which works with most protocols.
 	 */
-	rc->min_timeout = MS_TO_NS(40);
-	rc->max_timeout = MAX_TIMEOUT_NS;
+	rc->min_timeout = MS_TO_US(40);
+	rc->max_timeout = MAX_TIMEOUT_US;
 
 	err = rc_register_device(rc);
 	if (err)
@@ -491,6 +510,7 @@ static void irtoy_disconnect(struct usb_interface *intf)
 
 static const struct usb_device_id irtoy_table[] = {
 	{ USB_DEVICE_INTERFACE_CLASS(0x04d8, 0xfd08, USB_CLASS_CDC_DATA) },
+	{ USB_DEVICE_INTERFACE_CLASS(0x04d8, 0xf58b, USB_CLASS_CDC_DATA) },
 	{ }
 };
 

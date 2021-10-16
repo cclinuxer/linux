@@ -32,9 +32,11 @@
 #include <linux/swab.h>
 
 #include <asm/esr.h>
+#include <asm/exception.h>
 #include <asm/fpsimd.h>
 #include <asm/cpufeature.h>
 #include <asm/cputype.h>
+#include <asm/neon.h>
 #include <asm/processor.h>
 #include <asm/simd.h>
 #include <asm/sigcontext.h>
@@ -160,6 +162,8 @@ extern void __percpu *efi_sve_state;
 DEFINE_PER_CPU(bool, fpsimd_context_busy);
 EXPORT_PER_CPU_SYMBOL(fpsimd_context_busy);
 
+static void fpsimd_bind_task_to_cpu(void);
+
 static void __get_cpu_fpsimd_context(void)
 {
 	bool busy = __this_cpu_xchg(fpsimd_context_busy, true);
@@ -178,7 +182,7 @@ static void __get_cpu_fpsimd_context(void)
  */
 static void get_cpu_fpsimd_context(void)
 {
-	preempt_disable();
+	local_bh_disable();
 	__get_cpu_fpsimd_context();
 }
 
@@ -199,7 +203,7 @@ static void __put_cpu_fpsimd_context(void)
 static void put_cpu_fpsimd_context(void)
 {
 	__put_cpu_fpsimd_context();
-	preempt_enable();
+	local_bh_enable();
 }
 
 static bool have_cpu_fpsimd_context(void)
@@ -283,7 +287,7 @@ static void task_fpsimd_load(void)
 	WARN_ON(!system_supports_fpsimd());
 	WARN_ON(!have_cpu_fpsimd_context());
 
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (IS_ENABLED(CONFIG_ARM64_SVE) && test_thread_flag(TIF_SVE))
 		sve_load_state(sve_pffr(&current->thread),
 			       &current->thread.uw.fpsimd_state.fpsr,
 			       sve_vq_from_vl(current->thread.sve_vl) - 1);
@@ -305,14 +309,15 @@ static void fpsimd_save(void)
 	WARN_ON(!have_cpu_fpsimd_context());
 
 	if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
-		if (system_supports_sve() && test_thread_flag(TIF_SVE)) {
+		if (IS_ENABLED(CONFIG_ARM64_SVE) &&
+		    test_thread_flag(TIF_SVE)) {
 			if (WARN_ON(sve_get_vl() != last->sve_vl)) {
 				/*
 				 * Can't save the user regs, so current would
 				 * re-enter user with corrupt state.
 				 * There's no way to recover, so kill it:
 				 */
-				force_signal_inject(SIGKILL, SI_KERNEL, 0);
+				force_signal_inject(SIGKILL, SI_KERNEL, 0, 0);
 				return;
 			}
 
@@ -508,19 +513,13 @@ size_t sve_state_size(struct task_struct const *task)
 void sve_alloc(struct task_struct *task)
 {
 	if (task->thread.sve_state) {
-		memset(task->thread.sve_state, 0, sve_state_size(current));
+		memset(task->thread.sve_state, 0, sve_state_size(task));
 		return;
 	}
 
 	/* This is a small allocation (maximum ~8KB) and Should Not Fail. */
 	task->thread.sve_state =
 		kzalloc(sve_state_size(task), GFP_KERNEL);
-
-	/*
-	 * If future SVE revisions can have larger vectors though,
-	 * this may cease to be true:
-	 */
-	BUG_ON(!task->thread.sve_state);
 }
 
 
@@ -676,7 +675,7 @@ int sve_set_current_vl(unsigned long arg)
 	vl = arg & PR_SVE_VL_LEN_MASK;
 	flags = arg & ~vl;
 
-	if (!system_supports_sve())
+	if (!system_supports_sve() || is_compat_task())
 		return -EINVAL;
 
 	ret = sve_set_vector_length(current, vl, flags);
@@ -689,7 +688,7 @@ int sve_set_current_vl(unsigned long arg)
 /* PR_SVE_GET_VL */
 int sve_get_current_vl(void)
 {
-	if (!system_supports_sve())
+	if (!system_supports_sve() || is_compat_task())
 		return -EINVAL;
 
 	return sve_prctl_status(0);
@@ -924,11 +923,10 @@ void fpsimd_release_task(struct task_struct *dead_task)
  * Trapped SVE access
  *
  * Storage is allocated for the full SVE state, the current FPSIMD
- * register contents are migrated across, and TIF_SVE is set so that
- * the SVE access trap will be disabled the next time this task
- * reaches ret_to_user.
+ * register contents are migrated across, and the access trap is
+ * disabled.
  *
- * TIF_SVE should be clear on entry: otherwise, task_fpsimd_load()
+ * TIF_SVE should be clear on entry: otherwise, fpsimd_restore_current_state()
  * would have disabled the SVE access trap for userspace during
  * ret_to_user, making an SVE access trap impossible in that case.
  */
@@ -936,22 +934,37 @@ void do_sve_acc(unsigned int esr, struct pt_regs *regs)
 {
 	/* Even if we chose not to use SVE, the hardware could still trap: */
 	if (unlikely(!system_supports_sve()) || WARN_ON(is_compat_task())) {
-		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc);
+		force_signal_inject(SIGILL, ILL_ILLOPC, regs->pc, 0);
 		return;
 	}
 
 	sve_alloc(current);
+	if (!current->thread.sve_state) {
+		force_sig(SIGKILL);
+		return;
+	}
 
 	get_cpu_fpsimd_context();
 
-	fpsimd_save();
-
-	/* Force ret_to_user to reload the registers: */
-	fpsimd_flush_task_state(current);
-
-	fpsimd_to_sve(current);
 	if (test_and_set_thread_flag(TIF_SVE))
 		WARN_ON(1); /* SVE access shouldn't have trapped */
+
+	/*
+	 * Convert the FPSIMD state to SVE, zeroing all the state that
+	 * is not shared with FPSIMD. If (as is likely) the current
+	 * state is live in the registers then do this there and
+	 * update our metadata for the current task including
+	 * disabling the trap, otherwise update our in-memory copy.
+	 */
+	if (!test_thread_flag(TIF_FOREIGN_FPSTATE)) {
+		unsigned long vq_minus_one =
+			sve_vq_from_vl(current->thread.sve_vl) - 1;
+		sve_set_vq(vq_minus_one);
+		sve_flush_live(vq_minus_one);
+		fpsimd_bind_task_to_cpu();
+	} else {
+		fpsimd_to_sve(current);
+	}
 
 	put_cpu_fpsimd_context();
 }
@@ -1090,7 +1103,7 @@ void fpsimd_preserve_current_state(void)
 void fpsimd_signal_preserve_current_state(void)
 {
 	fpsimd_preserve_current_state();
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (test_thread_flag(TIF_SVE))
 		sve_to_fpsimd(current);
 }
 
@@ -1099,7 +1112,7 @@ void fpsimd_signal_preserve_current_state(void)
  * The caller must have ownership of the cpu FPSIMD context before calling
  * this function.
  */
-void fpsimd_bind_task_to_cpu(void)
+static void fpsimd_bind_task_to_cpu(void)
 {
 	struct fpsimd_last_state_struct *last =
 		this_cpu_ptr(&fpsimd_last_state);
@@ -1179,7 +1192,7 @@ void fpsimd_update_current_state(struct user_fpsimd_state const *state)
 	get_cpu_fpsimd_context();
 
 	current->thread.uw.fpsimd_state = *state;
-	if (system_supports_sve() && test_thread_flag(TIF_SVE))
+	if (test_thread_flag(TIF_SVE))
 		fpsimd_to_sve(current);
 
 	task_fpsimd_load();

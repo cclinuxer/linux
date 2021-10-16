@@ -389,6 +389,13 @@
 #define ST0_CU3			0x80000000
 #define ST0_XX			0x80000000	/* MIPS IV naming */
 
+/* in-kernel enabled CUs */
+#ifdef CONFIG_CPU_LOONGSON64
+#define ST0_KERNEL_CUMASK      (ST0_CU0 | ST0_CU2)
+#else
+#define ST0_KERNEL_CUMASK      ST0_CU0
+#endif
+
 /*
  * Bitfields and bit numbers in the coprocessor 0 IntCtl register. (MIPSR2)
  */
@@ -1078,6 +1085,10 @@
 #define CVMVMCONF_RMMUSIZEM1_S	0
 #define CVMVMCONF_RMMUSIZEM1	(_U64CAST_(0xff) << CVMVMCONF_RMMUSIZEM1_S)
 
+/* Debug register field definitions */
+#define MIPS_DEBUG_DBP_SHIFT	1
+#define MIPS_DEBUG_DBP		(_ULCAST_(1) << MIPS_DEBUG_DBP_SHIFT)
+
 /*
  * Coprocessor 1 (FPU) register names
  */
@@ -1706,12 +1717,6 @@ do {									\
 #define read_c0_count()		__read_32bit_c0_register($9, 0)
 #define write_c0_count(val)	__write_32bit_c0_register($9, 0, val)
 
-#define read_c0_count2()	__read_32bit_c0_register($9, 6) /* pnx8550 */
-#define write_c0_count2(val)	__write_32bit_c0_register($9, 6, val)
-
-#define read_c0_count3()	__read_32bit_c0_register($9, 7) /* pnx8550 */
-#define write_c0_count3(val)	__write_32bit_c0_register($9, 7, val)
-
 #define read_c0_entryhi()	__read_ulong_c0_register($10, 0)
 #define write_c0_entryhi(val)	__write_ulong_c0_register($10, 0, val)
 
@@ -1729,12 +1734,6 @@ do {									\
 
 #define read_c0_guestctl0ext()	__read_32bit_c0_register($11, 4)
 #define write_c0_guestctl0ext(val) __write_32bit_c0_register($11, 4, val)
-
-#define read_c0_compare2()	__read_32bit_c0_register($11, 6) /* pnx8550 */
-#define write_c0_compare2(val)	__write_32bit_c0_register($11, 6, val)
-
-#define read_c0_compare3()	__read_32bit_c0_register($11, 7) /* pnx8550 */
-#define write_c0_compare3(val)	__write_32bit_c0_register($11, 7, val)
 
 #define read_c0_status()	__read_32bit_c0_register($12, 0)
 
@@ -2078,7 +2077,7 @@ _ASM_MACRO_0(tlbginvf, _ASM_INSN_IF_MIPS(0x4200000c)
 ({ int __res;								\
 	__asm__ __volatile__(						\
 		".set\tpush\n\t"					\
-		".set\tmips32r2\n\t"					\
+		".set\tmips32r5\n\t"					\
 		_ASM_SET_VIRT						\
 		"mfgc0\t%0, " #source ", %1\n\t"			\
 		".set\tpop"						\
@@ -2091,7 +2090,7 @@ _ASM_MACRO_0(tlbginvf, _ASM_INSN_IF_MIPS(0x4200000c)
 ({ unsigned long long __res;						\
 	__asm__ __volatile__(						\
 		".set\tpush\n\t"					\
-		".set\tmips64r2\n\t"					\
+		".set\tmips64r5\n\t"					\
 		_ASM_SET_VIRT						\
 		"dmfgc0\t%0, " #source ", %1\n\t"			\
 		".set\tpop"						\
@@ -2104,7 +2103,7 @@ _ASM_MACRO_0(tlbginvf, _ASM_INSN_IF_MIPS(0x4200000c)
 do {									\
 	__asm__ __volatile__(						\
 		".set\tpush\n\t"					\
-		".set\tmips32r2\n\t"					\
+		".set\tmips32r5\n\t"					\
 		_ASM_SET_VIRT						\
 		"mtgc0\t%z0, " #register ", %1\n\t"			\
 		".set\tpop"						\
@@ -2116,7 +2115,7 @@ do {									\
 do {									\
 	__asm__ __volatile__(						\
 		".set\tpush\n\t"					\
-		".set\tmips64r2\n\t"					\
+		".set\tmips64r5\n\t"					\
 		_ASM_SET_VIRT						\
 		"dmtgc0\t%z0, " #register ", %1\n\t"			\
 		".set\tpop"						\
@@ -2728,7 +2727,7 @@ static inline void tlb_probe(void)
 
 static inline void tlb_read(void)
 {
-#if MIPS34K_MISSED_ITLB_WAR
+#ifdef CONFIG_WAR_MIPS34K_MISSED_ITLB
 	int res = 0;
 
 	__asm__ __volatile__(
@@ -2750,7 +2749,7 @@ static inline void tlb_read(void)
 		"tlbr\n\t"
 		".set reorder");
 
-#if MIPS34K_MISSED_ITLB_WAR
+#ifdef CONFIG_WAR_MIPS34K_MISSED_ITLB
 	if ((res & _ULCAST_(1)))
 		__asm__ __volatile__(
 		"	.set	push				\n"

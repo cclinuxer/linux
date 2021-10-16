@@ -170,6 +170,9 @@ static int cros_ec_regulator_init_info(struct device *dev,
 	data->voltages_mV =
 		devm_kmemdup(dev, resp.voltages_mv,
 			     sizeof(u16) * data->num_voltages, GFP_KERNEL);
+	if (!data->voltages_mV)
+		return -ENOMEM;
+
 	data->desc.n_voltages = data->num_voltages;
 
 	/* Make sure the returned name is always a valid string */
@@ -222,8 +225,9 @@ static int cros_ec_regulator_probe(struct platform_device *pdev)
 
 	drvdata->dev = devm_regulator_register(dev, &drvdata->desc, &cfg);
 	if (IS_ERR(drvdata->dev)) {
+		ret = PTR_ERR(drvdata->dev);
 		dev_err(&pdev->dev, "Failed to register regulator: %d\n", ret);
-		return PTR_ERR(drvdata->dev);
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, drvdata);

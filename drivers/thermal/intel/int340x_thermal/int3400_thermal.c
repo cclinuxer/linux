@@ -14,6 +14,7 @@
 
 #define INT3400_THERMAL_TABLE_CHANGED 0x83
 #define INT3400_ODVP_CHANGED 0x88
+#define INT3400_KEEP_ALIVE 0xA0
 
 enum int3400_thermal_uuid {
 	INT3400_THERMAL_PASSIVE_1,
@@ -81,6 +82,34 @@ static BIN_ATTR_RO(data_vault, 0);
 static struct bin_attribute *data_attributes[] = {
 	&bin_attr_data_vault,
 	NULL,
+};
+
+static ssize_t imok_store(struct device *dev, struct device_attribute *attr,
+			  const char *buf, size_t count)
+{
+	struct int3400_thermal_priv *priv = dev_get_drvdata(dev);
+	acpi_status status;
+	int input, ret;
+
+	ret = kstrtouint(buf, 10, &input);
+	if (ret)
+		return ret;
+	status = acpi_execute_simple_method(priv->adev->handle, "IMOK", input);
+	if (ACPI_FAILURE(status))
+		return -EIO;
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(imok);
+
+static struct attribute *imok_attr[] = {
+	&dev_attr_imok.attr,
+	NULL
+};
+
+static const struct attribute_group imok_attribute_group = {
+	.attrs = imok_attr,
 };
 
 static const struct attribute_group data_attribute_group = {
@@ -349,30 +378,33 @@ static void int3400_notify(acpi_handle handle,
 {
 	struct int3400_thermal_priv *priv = data;
 	char *thermal_prop[5];
+	int therm_event;
 
 	if (!priv)
 		return;
 
 	switch (event) {
 	case INT3400_THERMAL_TABLE_CHANGED:
-		thermal_prop[0] = kasprintf(GFP_KERNEL, "NAME=%s",
-				priv->thermal->type);
-		thermal_prop[1] = kasprintf(GFP_KERNEL, "TEMP=%d",
-				priv->thermal->temperature);
-		thermal_prop[2] = kasprintf(GFP_KERNEL, "TRIP=");
-		thermal_prop[3] = kasprintf(GFP_KERNEL, "EVENT=%d",
-				THERMAL_TABLE_CHANGED);
-		thermal_prop[4] = NULL;
-		kobject_uevent_env(&priv->thermal->device.kobj, KOBJ_CHANGE,
-				thermal_prop);
+		therm_event = THERMAL_TABLE_CHANGED;
+		break;
+	case INT3400_KEEP_ALIVE:
+		therm_event = THERMAL_EVENT_KEEP_ALIVE;
 		break;
 	case INT3400_ODVP_CHANGED:
 		evaluate_odvp(priv);
+		therm_event = THERMAL_DEVICE_POWER_CAPABILITY_CHANGED;
 		break;
 	default:
 		/* Ignore unknown notification codes sent to INT3400 device */
-		break;
+		return;
 	}
+
+	thermal_prop[0] = kasprintf(GFP_KERNEL, "NAME=%s", priv->thermal->type);
+	thermal_prop[1] = kasprintf(GFP_KERNEL, "TEMP=%d", priv->thermal->temperature);
+	thermal_prop[2] = kasprintf(GFP_KERNEL, "TRIP=");
+	thermal_prop[3] = kasprintf(GFP_KERNEL, "EVENT=%d", therm_event);
+	thermal_prop[4] = NULL;
+	kobject_uevent_env(&priv->thermal->device.kobj, KOBJ_CHANGE, thermal_prop);
 }
 
 static int int3400_thermal_get_temp(struct thermal_zone_device *thermal,
@@ -493,6 +525,12 @@ static int int3400_thermal_probe(struct platform_device *pdev)
 	if (result)
 		goto free_rel_misc;
 
+	if (acpi_has_method(priv->adev->handle, "IMOK")) {
+		result = sysfs_create_group(&pdev->dev.kobj, &imok_attribute_group);
+		if (result)
+			goto free_imok;
+	}
+
 	if (priv->data_vault) {
 		result = sysfs_create_group(&pdev->dev.kobj,
 					    &data_attribute_group);
@@ -516,6 +554,8 @@ free_sysfs:
 	}
 free_uuid:
 	sysfs_remove_group(&pdev->dev.kobj, &uuid_attribute_group);
+free_imok:
+	sysfs_remove_group(&pdev->dev.kobj, &imok_attribute_group);
 free_rel_misc:
 	if (!priv->rel_misc_dev_res)
 		acpi_thermal_rel_misc_device_remove(priv->adev->handle);
@@ -544,6 +584,7 @@ static int int3400_thermal_remove(struct platform_device *pdev)
 	if (priv->data_vault)
 		sysfs_remove_group(&pdev->dev.kobj, &data_attribute_group);
 	sysfs_remove_group(&pdev->dev.kobj, &uuid_attribute_group);
+	sysfs_remove_group(&pdev->dev.kobj, &imok_attribute_group);
 	thermal_zone_device_unregister(priv->thermal);
 	kfree(priv->data_vault);
 	kfree(priv->trts);
@@ -555,6 +596,7 @@ static int int3400_thermal_remove(struct platform_device *pdev)
 static const struct acpi_device_id int3400_thermal_match[] = {
 	{"INT3400", 0},
 	{"INTC1040", 0},
+	{"INTC1041", 0},
 	{}
 };
 

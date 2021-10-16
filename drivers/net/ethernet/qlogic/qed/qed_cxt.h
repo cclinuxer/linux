@@ -50,7 +50,7 @@ int qed_cxt_get_cid_info(struct qed_hwfn *p_hwfn,
 int qed_cxt_get_tid_mem_info(struct qed_hwfn *p_hwfn,
 			     struct qed_tid_mem *p_info);
 
-#define QED_CXT_ISCSI_TID_SEG	PROTOCOLID_ISCSI
+#define QED_CXT_TCP_ULP_TID_SEG	PROTOCOLID_TCP_ULP
 #define QED_CXT_ROCE_TID_SEG	PROTOCOLID_ROCE
 #define QED_CXT_FCOE_TID_SEG	PROTOCOLID_FCOE
 enum qed_cxt_elem_type {
@@ -326,9 +326,6 @@ struct qed_cxt_mngr {
 
 	/* SRC T2 */
 	struct qed_src_t2 src_t2;
-	u32 t2_num_pages;
-	u64 first_free;
-	u64 last_free;
 
 	/* total number of SRQ's for this hwfn */
 	u32 srq_count;

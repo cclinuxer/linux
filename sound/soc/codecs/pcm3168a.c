@@ -306,6 +306,13 @@ static int pcm3168a_set_dai_sysclk(struct snd_soc_dai *dai,
 	struct pcm3168a_priv *pcm3168a = snd_soc_component_get_drvdata(dai->component);
 	int ret;
 
+	/*
+	 * Some sound card sets 0 Hz as reset,
+	 * but it is impossible to set. Ignore it here
+	 */
+	if (freq == 0)
+		return 0;
+
 	if (freq > PCM3168A_MAX_SYSCLK)
 		return -EINVAL;
 
@@ -566,6 +573,30 @@ static int pcm3168a_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+static u64 pcm3168a_dai_formats[] = {
+	/*
+	 * Select below from Sound Card, not here
+	 *	SND_SOC_DAIFMT_CBC_CFC
+	 *	SND_SOC_DAIFMT_CBP_CFP
+	 */
+
+	/*
+	 * First Priority
+	 */
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J,
+	/*
+	 * Second Priority
+	 *
+	 * These have picky limitation.
+	 * see
+	 *	pcm3168a_hw_params()
+	 */
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B,
+};
+
 static const struct snd_soc_dai_ops pcm3168a_dai_ops = {
 	.set_fmt	= pcm3168a_set_dai_fmt,
 	.set_sysclk	= pcm3168a_set_dai_sysclk,
@@ -573,6 +604,8 @@ static const struct snd_soc_dai_ops pcm3168a_dai_ops = {
 	.mute_stream	= pcm3168a_mute,
 	.set_tdm_slot	= pcm3168a_set_tdm_slot,
 	.no_capture_mute = 1,
+	.auto_selectable_formats	= pcm3168a_dai_formats,
+	.num_auto_selectable_formats	= ARRAY_SIZE(pcm3168a_dai_formats),
 };
 
 static struct snd_soc_dai_driver pcm3168a_dais[] = {

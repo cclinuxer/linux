@@ -24,6 +24,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 
+#include "hinic_debugfs.h"
 #include "hinic_hw_qp.h"
 #include "hinic_hw_dev.h"
 #include "hinic_devlink.h"
@@ -153,6 +154,8 @@ static int create_txqs(struct hinic_dev *nic_dev)
 	if (!nic_dev->txqs)
 		return -ENOMEM;
 
+	hinic_sq_dbgfs_init(nic_dev);
+
 	for (i = 0; i < num_txqs; i++) {
 		struct hinic_sq *sq = hinic_hwdev_get_sq(nic_dev->hwdev, i);
 
@@ -162,16 +165,47 @@ static int create_txqs(struct hinic_dev *nic_dev)
 				  "Failed to init Txq\n");
 			goto err_init_txq;
 		}
+
+		err = hinic_sq_debug_add(nic_dev, i);
+		if (err) {
+			netif_err(nic_dev, drv, netdev,
+				  "Failed to add SQ%d debug\n", i);
+			goto err_add_sq_dbg;
+		}
 	}
 
 	return 0;
 
+err_add_sq_dbg:
+	hinic_clean_txq(&nic_dev->txqs[i]);
 err_init_txq:
-	for (j = 0; j < i; j++)
+	for (j = 0; j < i; j++) {
+		hinic_sq_debug_rem(nic_dev->txqs[j].sq);
 		hinic_clean_txq(&nic_dev->txqs[j]);
+	}
+
+	hinic_sq_dbgfs_uninit(nic_dev);
 
 	devm_kfree(&netdev->dev, nic_dev->txqs);
 	return err;
+}
+
+static void enable_txqs_napi(struct hinic_dev *nic_dev)
+{
+	int num_txqs = hinic_hwdev_num_qps(nic_dev->hwdev);
+	int i;
+
+	for (i = 0; i < num_txqs; i++)
+		napi_enable(&nic_dev->txqs[i].napi);
+}
+
+static void disable_txqs_napi(struct hinic_dev *nic_dev)
+{
+	int num_txqs = hinic_hwdev_num_qps(nic_dev->hwdev);
+	int i;
+
+	for (i = 0; i < num_txqs; i++)
+		napi_disable(&nic_dev->txqs[i].napi);
 }
 
 /**
@@ -186,15 +220,19 @@ static void free_txqs(struct hinic_dev *nic_dev)
 	if (!nic_dev->txqs)
 		return;
 
-	for (i = 0; i < num_txqs; i++)
+	for (i = 0; i < num_txqs; i++) {
+		hinic_sq_debug_rem(nic_dev->txqs[i].sq);
 		hinic_clean_txq(&nic_dev->txqs[i]);
+	}
+
+	hinic_sq_dbgfs_uninit(nic_dev);
 
 	devm_kfree(&netdev->dev, nic_dev->txqs);
 	nic_dev->txqs = NULL;
 }
 
 /**
- * create_txqs - Create the Logical Rx Queues of specific NIC device
+ * create_rxqs - Create the Logical Rx Queues of specific NIC device
  * @nic_dev: the specific NIC device
  *
  * Return 0 - Success, negative - Failure
@@ -213,6 +251,8 @@ static int create_rxqs(struct hinic_dev *nic_dev)
 	if (!nic_dev->rxqs)
 		return -ENOMEM;
 
+	hinic_rq_dbgfs_init(nic_dev);
+
 	for (i = 0; i < num_rxqs; i++) {
 		struct hinic_rq *rq = hinic_hwdev_get_rq(nic_dev->hwdev, i);
 
@@ -222,20 +262,33 @@ static int create_rxqs(struct hinic_dev *nic_dev)
 				  "Failed to init rxq\n");
 			goto err_init_rxq;
 		}
+
+		err = hinic_rq_debug_add(nic_dev, i);
+		if (err) {
+			netif_err(nic_dev, drv, netdev,
+				  "Failed to add RQ%d debug\n", i);
+			goto err_add_rq_dbg;
+		}
 	}
 
 	return 0;
 
+err_add_rq_dbg:
+	hinic_clean_rxq(&nic_dev->rxqs[i]);
 err_init_rxq:
-	for (j = 0; j < i; j++)
+	for (j = 0; j < i; j++) {
+		hinic_rq_debug_rem(nic_dev->rxqs[j].rq);
 		hinic_clean_rxq(&nic_dev->rxqs[j]);
+	}
+
+	hinic_rq_dbgfs_uninit(nic_dev);
 
 	devm_kfree(&netdev->dev, nic_dev->rxqs);
 	return err;
 }
 
 /**
- * free_txqs - Free the Logical Rx Queues of specific NIC device
+ * free_rxqs - Free the Logical Rx Queues of specific NIC device
  * @nic_dev: the specific NIC device
  **/
 static void free_rxqs(struct hinic_dev *nic_dev)
@@ -246,8 +299,12 @@ static void free_rxqs(struct hinic_dev *nic_dev)
 	if (!nic_dev->rxqs)
 		return;
 
-	for (i = 0; i < num_rxqs; i++)
+	for (i = 0; i < num_rxqs; i++) {
+		hinic_rq_debug_rem(nic_dev->rxqs[i].rq);
 		hinic_clean_rxq(&nic_dev->rxqs[i]);
+	}
+
+	hinic_rq_dbgfs_uninit(nic_dev);
 
 	devm_kfree(&netdev->dev, nic_dev->rxqs);
 	nic_dev->rxqs = NULL;
@@ -255,13 +312,7 @@ static void free_rxqs(struct hinic_dev *nic_dev)
 
 static int hinic_configure_max_qnum(struct hinic_dev *nic_dev)
 {
-	int err;
-
-	err = hinic_set_max_qnum(nic_dev, nic_dev->hwdev->nic_cap.max_qps);
-	if (err)
-		return err;
-
-	return 0;
+	return hinic_set_max_qnum(nic_dev, nic_dev->hwdev->nic_cap.max_qps);
 }
 
 static int hinic_rss_init(struct hinic_dev *nic_dev)
@@ -400,6 +451,8 @@ int hinic_open(struct net_device *netdev)
 		goto err_create_txqs;
 	}
 
+	enable_txqs_napi(nic_dev);
+
 	err = create_rxqs(nic_dev);
 	if (err) {
 		netif_err(nic_dev, drv, netdev,
@@ -484,6 +537,7 @@ err_port_state:
 	}
 
 err_create_rxqs:
+	disable_txqs_napi(nic_dev);
 	free_txqs(nic_dev);
 
 err_create_txqs:
@@ -496,6 +550,9 @@ int hinic_close(struct net_device *netdev)
 {
 	struct hinic_dev *nic_dev = netdev_priv(netdev);
 	unsigned int flags;
+
+	/* Disable txq napi firstly to aviod rewaking txq in free_tx_poll */
+	disable_txqs_napi(nic_dev);
 
 	down(&nic_dev->mgmt_lock);
 
@@ -889,11 +946,16 @@ static void netdev_features_init(struct net_device *netdev)
 	netdev->hw_features = NETIF_F_SG | NETIF_F_HIGHDMA | NETIF_F_IP_CSUM |
 			      NETIF_F_IPV6_CSUM | NETIF_F_TSO | NETIF_F_TSO6 |
 			      NETIF_F_RXCSUM | NETIF_F_LRO |
-			      NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX;
+			      NETIF_F_HW_VLAN_CTAG_TX | NETIF_F_HW_VLAN_CTAG_RX |
+			      NETIF_F_GSO_UDP_TUNNEL | NETIF_F_GSO_UDP_TUNNEL_CSUM;
 
 	netdev->vlan_features = netdev->hw_features;
 
 	netdev->features = netdev->hw_features | NETIF_F_HW_VLAN_CTAG_FILTER;
+
+	netdev->hw_enc_features = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM | NETIF_F_SCTP_CRC |
+				  NETIF_F_SG | NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_TSO_ECN |
+				  NETIF_F_GSO_UDP_TUNNEL_CSUM | NETIF_F_GSO_UDP_TUNNEL;
 }
 
 static void hinic_refresh_nic_cfg(struct hinic_dev *nic_dev)
@@ -921,7 +983,7 @@ static void hinic_refresh_nic_cfg(struct hinic_dev *nic_dev)
  * @handle: nic device for the handler
  * @buf_in: input buffer
  * @in_size: input size
- * @buf_in: output buffer
+ * @buf_out: output buffer
  * @out_size: returned output size
  *
  * Return 0 - Success, negative - Failure
@@ -1121,7 +1183,7 @@ static int nic_dev_init(struct pci_dev *pdev)
 	struct devlink *devlink;
 	int err, num_qps;
 
-	devlink = hinic_devlink_alloc();
+	devlink = hinic_devlink_alloc(&pdev->dev);
 	if (!devlink) {
 		dev_err(&pdev->dev, "Hinic devlink alloc failed\n");
 		return -ENOMEM;
@@ -1260,6 +1322,16 @@ static int nic_dev_init(struct pci_dev *pdev)
 		goto err_init_intr;
 	}
 
+	hinic_dbg_init(nic_dev);
+
+	hinic_func_tbl_dbgfs_init(nic_dev);
+
+	err = hinic_func_table_debug_add(nic_dev);
+	if (err) {
+		dev_err(&pdev->dev, "Failed to add func_table debug\n");
+		goto err_add_func_table_dbg;
+	}
+
 	err = register_netdev(netdev);
 	if (err) {
 		dev_err(&pdev->dev, "Failed to register netdev\n");
@@ -1269,6 +1341,10 @@ static int nic_dev_init(struct pci_dev *pdev)
 	return 0;
 
 err_reg_netdev:
+	hinic_func_table_debug_rem(nic_dev);
+err_add_func_table_dbg:
+	hinic_func_tbl_dbgfs_uninit(nic_dev);
+	hinic_dbg_uninit(nic_dev);
 	hinic_free_intr_coalesce(nic_dev);
 err_init_intr:
 err_set_pfc:
@@ -1316,25 +1392,13 @@ static int hinic_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (err) {
 		dev_warn(&pdev->dev, "Couldn't set 64-bit DMA mask\n");
-		err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (err) {
 			dev_err(&pdev->dev, "Failed to set DMA mask\n");
 			goto err_dma_mask;
-		}
-	}
-
-	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
-	if (err) {
-		dev_warn(&pdev->dev,
-			 "Couldn't set 64-bit consistent DMA mask\n");
-		err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-		if (err) {
-			dev_err(&pdev->dev,
-				"Failed to set consistent DMA mask\n");
-			goto err_dma_consistent_mask;
 		}
 	}
 
@@ -1348,7 +1412,6 @@ static int hinic_probe(struct pci_dev *pdev,
 	return 0;
 
 err_nic_dev_init:
-err_dma_consistent_mask:
 err_dma_mask:
 	pci_release_regions(pdev);
 
@@ -1390,6 +1453,12 @@ static void hinic_remove(struct pci_dev *pdev)
 	}
 
 	unregister_netdev(netdev);
+
+	hinic_func_table_debug_rem(nic_dev);
+
+	hinic_func_tbl_dbgfs_uninit(nic_dev);
+
+	hinic_dbg_uninit(nic_dev);
 
 	hinic_free_intr_coalesce(nic_dev);
 
@@ -1445,4 +1514,17 @@ static struct pci_driver hinic_driver = {
 	.sriov_configure = hinic_pci_sriov_configure,
 };
 
-module_pci_driver(hinic_driver);
+static int __init hinic_module_init(void)
+{
+	hinic_dbg_register_debugfs(HINIC_DRV_NAME);
+	return pci_register_driver(&hinic_driver);
+}
+
+static void __exit hinic_module_exit(void)
+{
+	pci_unregister_driver(&hinic_driver);
+	hinic_dbg_unregister_debugfs();
+}
+
+module_init(hinic_module_init);
+module_exit(hinic_module_exit);

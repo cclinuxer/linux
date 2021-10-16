@@ -700,6 +700,8 @@ static int kabylake_set_bias_level(struct snd_soc_card *card,
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
 		if (dapm->bias_level == SND_SOC_BIAS_ON) {
+			if (!__clk_is_enabled(priv->mclk))
+				return 0;
 			dev_dbg(card->dev, "Disable mclk");
 			clk_disable_unprepare(priv->mclk);
 		} else {
@@ -835,6 +837,7 @@ static const struct platform_device_id kbl_board_ids[] = {
 	{ .name = "kbl_r5514_5663_max" },
 	{ }
 };
+MODULE_DEVICE_TABLE(platform, kbl_board_ids);
 
 static struct platform_driver kabylake_audio = {
 	.probe = kabylake_audio_probe,
@@ -851,4 +854,3 @@ module_platform_driver(kabylake_audio)
 MODULE_DESCRIPTION("Audio Machine driver-RT5663 RT5514 & MAX98927");
 MODULE_AUTHOR("Harsha Priya <harshapriya.n@intel.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:kbl_r5514_5663_max");
